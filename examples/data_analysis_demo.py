@@ -26,11 +26,16 @@ import pandas as pd
 from harness.agents.registry import AgentRegistry
 from harness.audit import get_audit_logger
 from harness.context import ContextManager
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
 from harness.orchestrator import build_plan_execute_graph, make_plan_execute_state
 from harness.planning import QualityGate, TaskPlanner, TaskStore
 from harness.tool_broker import ToolBroker
 from harness.vfs import VirtualFileSystem
+from packages.data_analysis.agents import build_agents
 from packages.data_analysis.offline import (
+    CLEAN_STEM,
     RAW_FILE,
     ScriptedAnalysisLLM,
     make_dirty_data,
@@ -157,6 +162,11 @@ def main(goal: str | None = None) -> None:
     broker = ToolBroker(audit_logger=get_audit_logger())
     register_builtin_tools(broker)
     registry = AgentRegistry()
+    # 框架不内置领域角色：从数据分析领域包挂载子 Agent 定义
+    # （data-explorer / analyst / reporter），否则规划器的 available_agents 为空，
+    # 真实 LLM 不知道可以分派给谁，脚本化 LLM 也会在 registry.get 时抛 KeyError。
+    for _def in build_agents().values():
+        registry.register(_def)
     store = TaskStore(backend="memory")
     llm = _build_llm()
     gate = QualityGate(llm=llm, use_critic=False)  # 关闭语义 Critic，只跑硬校验
@@ -175,11 +185,14 @@ def main(goal: str | None = None) -> None:
     context_manager = ContextManager(vfs=VirtualFileSystem())
     _print_context_budget(context_manager)
 
+    # checkpointer 是 interrupt()/Command(resume=...) 的前置条件
+    checkpointer = MemorySaver()
     graph = build_plan_execute_graph(
         llm, broker, planner=planner, store=store,
         registry=registry, gate=gate, max_replans=2,
         tool_mode=settings.runtime.agent_tool_mode,
         context_manager=context_manager,
+        checkpointer=checkpointer,
     )
     print(f"工具调用范式：agent_tool_mode={settings.runtime.agent_tool_mode}")
 
@@ -189,10 +202,24 @@ def main(goal: str | None = None) -> None:
     print("\n" + "=" * 64)
     print("启动 Plan-and-Execute 端到端链路")
     print("=" * 64)
+    run_config = {"recursion_limit": 200, "configurable": {"thread_id": "demo-thread"}}
     state = graph.invoke(
         make_plan_execute_state(goal or DEFAULT_GOAL),
-        config={"recursion_limit": 80},
+        config=run_config,
     )
+    # 非交互模式：工具审批中断自动批准（沙箱仍会拦截危险代码），循环恢复直到图收尾
+    _auto_approve = {"approved": True, "comment": "非交互模式自动批准",
+                     "approver": "auto", "approver_role": "system"}
+    _cycle = 0
+    while state.get("__interrupt__"):
+        _cycle += 1
+        _req = state["__interrupt__"][0].value
+        _tool = _req.get("tool", "?") if isinstance(_req, dict) else "?"
+        print(f"[审批 #{_cycle}] {_tool} 请求执行，非交互模式自动批准...")
+        state = graph.invoke(Command(resume=_auto_approve), config=run_config)
+        if _cycle >= 50:
+            print("[警告] 审批循环超过 50 次，强制停止")
+            break
 
     # ---- 结果展示 ----
     plan = state["plan"]

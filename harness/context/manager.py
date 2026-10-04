@@ -389,10 +389,15 @@ class ContextManager:
         start_on: MessageTypes = None,
         end_on: MessageTypes = None,
     ) -> list[Message]:
-        """最后防线：从最旧的非锚点消息开始丢弃，直到总字符不超过预算。
+        """最后防线：预算超限时丢弃消息，优先保留高信息密度内容。
 
-        丢弃后仍须做窗口边界对齐（``start_on``/``end_on``）—— 逐条丢弃会切断
-        ``assistant(tool_calls)`` 与 ``role="tool"`` 的配对，必须事后修正。
+        保留优先级（从高到低）：
+        1. 锚点（第一条 user，任务描述）—— 始终保留；
+        2. folded_review（前期操作回顾摘要）—— 信息密度最高，丢弃它等于丢失全部早期上下文；
+        3. 其余消息按"最新优先"填充剩余预算。
+
+        丢弃时记录被丢弃消息的角色与内容预览（可观测性），便于判断丢弃是否影响 LLM 决策。
+        丢弃后仍须做窗口边界对齐（``start_on``/``end_on``）。
         """
         anchor: list[Message] = []
         rest = messages
@@ -400,15 +405,53 @@ class ContextManager:
             anchor = [messages[0]]
             rest = messages[1:]
 
+        # 分离 folded_review（高优先级）与普通消息
+        review_msgs: list[Message] = []
+        normal: list[Message] = []
+        for m in rest:
+            content = m.get("content", "") or ""
+            if content.startswith(_REVIEW_HEADER) or "前期操作回顾" in content[:40]:
+                review_msgs.append(m)
+            else:
+                normal.append(m)
+
         total = self._total_chars(anchor)
         kept: list[Message] = []
-        for m in reversed(rest):  # 倒序优先保留较新的消息
+
+        # 优先级 2：先保留 folded_review（如果放得下）
+        for m in review_msgs:
+            chars = len(m.get("content", ""))
+            if total + chars <= self.budget.max_history_chars:
+                kept.append(m)
+                total += chars
+            # 如果 folded_review 本身就放不下，记日志但不强行截断（它已经是压缩后的摘要）
+
+        # 优先级 3：其余消息最新优先填充
+        dropped_roles: list[str] = []
+        for m in reversed(normal):
             chars = len(m.get("content", ""))
             if total + chars > self.budget.max_history_chars:
+                dropped_roles.append(m.get("role", "?"))
                 continue
             kept.append(m)
             total += chars
-        window = self._align_window(list(reversed(kept)), start_on, end_on)
+
+        if dropped_roles:
+            logger.info(
+                "Budget violation: dropped %d messages (roles=%s), kept %d + %d review, "
+                "total_chars=%d/%d",
+                len(dropped_roles), dropped_roles[:10],
+                len(kept) - len(review_msgs), len(review_msgs),
+                total, self.budget.max_history_chars,
+            )
+
+        # kept 目前是 [review_msgs..., 最新normal..., 次新normal...] —— 需要按原始顺序排列
+        # review_msgs 在原始列表中位于 normal 之前，所以最终顺序是 review + 按时间正序的 normal
+        kept_review = [m for m in review_msgs if m in kept]
+        kept_normal_reversed = [m for m in kept if m not in review_msgs]
+        ordered = kept_review + list(reversed(kept_normal_reversed))
+
+        window = self._align_window(ordered, start_on, end_on)
         return anchor + window
 
     # ------------------------------------------------------------------

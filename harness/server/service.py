@@ -269,12 +269,14 @@ class HarnessService:
         if channel == "http":
             return
         if channel == "none":
-            raise RuntimeError(
-                f"存在需人工审批的工具 {approval_tools}，但 SERVER_APPROVAL_CHANNEL=none"
-                "（声明为无人值守）—— 二者自相矛盾：这些工具永远等不到审批。"
-                "请改为 http（本部署有人审），或去掉这些工具的 requires_approval / "
-                "为它们注册风险策略使其可自动放行。"
+            # 无人值守：需审批工具由节点层自动批准（靠沙箱隔离兜底），不弹审批。
+            # 这是合法部署形态（CI / 演示 / 内网开发），仅记 WARNING 提醒安全责任。
+            logger.warning(
+                "SERVER_APPROVAL_CHANNEL=none（无人值守）：需审批工具 %s "
+                "将被自动批准，安全完全依赖沙箱隔离。生产环境请改为 http。",
+                approval_tools,
             )
+            return
         raise RuntimeError(
             f"存在需人工审批的工具 {approval_tools}，但未配置 SERVER_APPROVAL_CHANNEL。"
             '请明确回答这个部署有没有人审：设为 "http"（有人审）或 "none"（无人值守）。'

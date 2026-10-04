@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # 启动 Governed 的沙箱层基础设施（OpenSandbox 服务端）
 #
 # 服务端以独立 venv 运行在本目录，不与项目 .venv 混装：
@@ -18,14 +18,17 @@
 #   infra\opensandbox-server\start.ps1
 # ============================================================================
 $ErrorActionPreference = "Stop"
-$here    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$exe     = Join-Path $here ".venv\Scripts\opensandbox-server.exe"
-$conf    = Join-Path $here "sandbox.toml"
-$example = Join-Path $here "sandbox.toml.example"
-$stateDir = Join-Path $here "state"
+$here      = Split-Path -Parent $MyInvocation.MyCommand.Path
+$py        = Join-Path $here ".venv\Scripts\python.exe"
+$conf      = Join-Path $here "sandbox.toml"
+$example   = Join-Path $here "sandbox.toml.example"
+$stateDir  = Join-Path $here "state"
 
-if (-not (Test-Path $exe)) {
-    Write-Host "未找到服务端：$exe" -ForegroundColor Red
+# 注意：用 python.exe 而非 .venv\Scripts\opensandbox-server.exe —— 该 console
+# 入口脚本在部分 Windows 环境下会静默退出（exit 1、无任何输出）。直接经
+# python -c 调用 CLI 入口更可靠，且不改变任何运行语义。
+if (-not (Test-Path $py)) {
+    Write-Host "未找到服务端 Python：$py" -ForegroundColor Red
     Write-Host "请先在本目录准备独立 venv：" -ForegroundColor Yellow
     Write-Host "  python -m venv .venv"
     Write-Host "  .venv\Scripts\python.exe -m pip install opensandbox-server==0.2.3"
@@ -56,4 +59,5 @@ if (-not (Test-Path $stateDir)) {
 }
 
 Write-Host "启动 OpenSandbox 服务端（Ctrl+C 停止）..." -ForegroundColor Cyan
-& $exe --config $conf
+$cliCode = "from opensandbox_server.cli import main; main()"
+& $py -c $cliCode --config $conf

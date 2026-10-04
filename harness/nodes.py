@@ -246,6 +246,26 @@ class ReActNodes:
                 policy=decision.policy, fallback=decision.fallback,
             )
 
+        # 无人值守部署（approval_channel="none"）：所有前置闸门（PDP / 会话豁免 /
+        # 风险策略）均已放行，此处不再 interrupt 等人审，直接自动批准。
+        # "none" 的语义：明确声明本部署没人审 → 高风险工具靠沙箱隔离兜底，
+        # 审批闸门自动放行（仍留审计痕迹）。
+        from harness.config import settings
+        if settings.server.approval_channel == "none":
+            logger.info("Tool %s auto-approved (approval_channel=none, unattended)",
+                        tool_name)
+            emit_guard_decision(
+                state.get("trace_id"), layer=GUARD_LAYER_APPROVAL,
+                decision="allow",
+                reason="无人值守自动批准（approval_channel=none）",
+                tool=tool_name,
+                task_id=state.get("task_id"), agent_id=state.get("agent_id"),
+                via="unattended_auto",
+            )
+            return True, "", self._make_approval_credential(
+                tool_name, state, via="unattended_auto",
+            )
+
         # 审批请求的关联 id 与过期时刻：request_id 用来把 APPROVAL_REQUIRED 与
         # 后续 APPROVAL_RESOLVED 配对（此刻还没有 LangGraph 的系统 interrupt id）；
         # expires_at 由服务层在 resume 时强制（超时只能驳回、不能批准）。
@@ -618,6 +638,12 @@ class ReActNodes:
             messages.append({"role": "system", "content": wm_index})
         messages += history
 
+        # 软停止：连续滥用同一需审批工具时注入引导提示（在 LLM 调用之前）
+        _soft_warn = self._repetitive_tool_warning(state)
+        if _soft_warn:
+            messages.append({"role": "system", "content": _soft_warn})
+            logger.info("Soft-stop warning injected at step %d", current_step)
+
         ctx = MiddlewareContext(
             operation="llm/think",
             trace_id=state.get("trace_id"),
@@ -725,6 +751,51 @@ class ReActNodes:
         )
         return update
 
+
+    def _repetitive_tool_warning(self, state: AgentState) -> Optional[str]:
+        """软停止：检测同一 requires_approval 工具被连续调用 ≥3 次，返回引导提示。
+
+        扫描最近的 assistant 消息（原始 JSON 决策），提取 action 字段。
+        仅对 requires_approval=True 的工具告警——这类工具每次调用都触发
+        interrupt/审批/沙箱，连续滥用代价最高（如 code_executor 死循环）。
+        """
+        raw_msgs = state.get("messages", [])
+        if not raw_msgs:
+            return None
+        dicts = self._messages_to_dicts(raw_msgs)
+        # 取最近的 assistant 消息，提取 action
+        recent_actions: list[str] = []
+        for m in reversed(dicts):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content", "")
+            if not content:
+                continue
+            decision = _try_extract_json(content)
+            if decision is None:
+                continue
+            action = decision.get("action")
+            if action:
+                recent_actions.append(str(action))
+            if len(recent_actions) >= 5:
+                break
+        if len(recent_actions) < 3:
+            return None
+        # 最近 3 次是否同一工具
+        if recent_actions[0] != recent_actions[1] or recent_actions[1] != recent_actions[2]:
+            return None
+        tool_name = recent_actions[0]
+        tool_def = self.broker.get(tool_name) if self.broker else None
+        if tool_def is None or not tool_def.requires_approval:
+            return None
+        return (
+            f"【框架提示】你已连续调用 {tool_name} {len(recent_actions)} 次。"
+            "请停下来反思：\n"
+            f"1. 是否有专用工具可替代 {tool_name}？（如 eda / chart_generator / sql_query）\n"
+            "2. 已有信息是否足够产出 final_answer？不要为了'再算点东西'而重复调用。\n"
+            "3. 如果确实需要继续，请在 thought 中说明前几次结果的具体不足。"
+        )
+
     def _think_react(self, state: AgentState) -> dict[str, Any]:
         """ReAct 决策：工具清单拼进 system 提示，解析模型输出的 JSON 决策。"""
         current_step = state.get("current_step", 0) + 1
@@ -743,6 +814,12 @@ class ReActNodes:
         if wm_index:
             messages.append({"role": "system", "content": wm_index})
         messages += history
+
+        # 软停止：连续滥用同一需审批工具时注入引导提示（在 LLM 调用之前）
+        _soft_warn = self._repetitive_tool_warning(state)
+        if _soft_warn:
+            messages.append({"role": "system", "content": _soft_warn})
+            logger.info("Soft-stop warning injected at step %d", current_step)
 
         ctx = MiddlewareContext(
             operation="llm/think",

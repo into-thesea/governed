@@ -180,7 +180,12 @@ class ServerSettings(BaseSettings):
     """这个部署**有没有**审批通道：``"http"``（有人审）| ``"none"``（明确无人值守）。
 
     **不设默认值** —— 默认值一旦存在，就等于没人回答过"这个部署有没有人审"。
-    存在需审批工具却未配置（或配成 ``none``）时**装配即失败**。
+
+    - ``"http"``：有人审。需审批工具走 LangGraph interrupt，由审批通道（HTTP API）
+      下发批准/驳回。
+    - ``"none"``：明确无人值守。需审批工具由节点层**自动批准**（不 interrupt），
+      安全完全依赖沙箱隔离。适用于 CI / 演示 / 内网开发。装配时记 WARNING。
+    - ``None``（未配置）：存在需审批工具时**装配即失败**——必须明确回答有没有人审。
     """
 
     approval_unattended: str = "auto_reject"

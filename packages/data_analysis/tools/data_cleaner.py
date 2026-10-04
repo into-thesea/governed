@@ -309,6 +309,9 @@ def handle(args: dict, context: dict):
     for col, cfg in (rules.get("outliers") or {}).items():
         if col not in df.columns or not pdt.is_numeric_dtype(df[col]):
             continue
+        # 容错：LLM 可能传 "iqr" 字符串而非 {"method": "iqr"} dict
+        if isinstance(cfg, str):
+            cfg = {"method": cfg}
         action = cfg.get("action", "clip")
         if action == "winsorize":
             q = float(cfg.get("quantile", 0.01))

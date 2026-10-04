@@ -352,8 +352,11 @@ def test_chart_generator() -> None:
 def test_code_executor() -> None:
     """沙箱代码执行：经 OpenSandbox 隔离容器执行，含双层文件平面往返。
 
-    依赖沙箱基础设施（OpenSandbox 服务端 + Docker）。未就绪时本项**直接失败**，
-    不做静默跳过 —— 沙箱是本项目的安全边界，其可用性不该被降级掩盖。
+    依赖沙箱基础设施（OpenSandbox 服务端 + Docker）。pytest 下默认不可达时 skip，
+    加 ``--require-sandbox`` 严格 fail（与 ``needs_sandbox`` marker 约定一致，见 pytest.ini）；
+    直接 ``python -m tests._smoke_tools`` 运行时由函数内的 ``SandboxClient().available()``
+    探测 assert fail。沙箱不可用时必须 fail closed、不降级为宿主进程的安全断言由
+    同文件 ``test_sandbox_fail_closed`` 覆盖（无 marker，永远运行）。
     """
     from harness.sandbox.client import SandboxClient
     from packages.data_analysis.tools.code_executor import handle as code_handler
