@@ -78,7 +78,7 @@ class Tracer:
         # 同一 Tracer 可能被同一线程内的嵌套节点共用，栈与列表的复合操作要加锁
         self._lock = threading.RLock()
         # 采样在创建时定一次，整条链路保持一致 —— 按 span 采会把调用树采残
-        self.sampled = random.random() < max(min(settings.trace.sample_rate, 1.0), 0.0)
+        self.sampled = random.random() < max(min(settings.trace.sample_rate, 1.0), 0.0)  # nosec B311 - trace 采样用伪随机，非安全/密码用途
 
     @property
     def recording(self) -> bool:

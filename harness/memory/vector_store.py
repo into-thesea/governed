@@ -372,14 +372,9 @@ class PgVectorStore(VectorStore):
             return 0
         with self._lock, self._conn.cursor() as cur:
             cur.executemany(
-                f"""
-                INSERT INTO {self.table} (id, agent_id, content, embedding, metadata, created_at)
-                VALUES (%s, %s, %s, %s::vector, %s::jsonb, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    content = EXCLUDED.content,
-                    embedding = EXCLUDED.embedding,
-                    metadata = EXCLUDED.metadata
-                """,
+                f"INSERT INTO {self.table} (id, agent_id, content, embedding, metadata, created_at) "  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
+                f"VALUES (%s, %s, %s, %s::vector, %s::jsonb, %s) "
+                f"ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata",
                 [
                     (
                         r.id,
@@ -403,7 +398,7 @@ class PgVectorStore(VectorStore):
         min_score: float = -1.0,
     ) -> list[VectorHit]:
         sql = (
-            f"SELECT id, content, metadata, 1 - (embedding <=> %s::vector) AS score "
+            f"SELECT id, content, metadata, 1 - (embedding <=> %s::vector) AS score "  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
             f"FROM {self.table} "
         )
         params: list[Any] = [self._to_pg_vector(vector)]
@@ -426,36 +421,30 @@ class PgVectorStore(VectorStore):
         if not ids:
             return 0
         with self._lock, self._conn.cursor() as cur:
-            cur.execute(f"DELETE FROM {self.table} WHERE id = ANY(%s)", (ids,))
+            cur.execute(f"DELETE FROM {self.table} WHERE id = ANY(%s)", (ids,))  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
             return cur.rowcount or 0
 
     def clear(self, *, agent_id: Optional[str] = None) -> None:
         with self._lock, self._conn.cursor() as cur:
             if agent_id is None:
-                cur.execute(f"DELETE FROM {self.table}")
+                cur.execute(f"DELETE FROM {self.table}")  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
             else:
-                cur.execute(f"DELETE FROM {self.table} WHERE agent_id = %s", (agent_id,))
+                cur.execute(f"DELETE FROM {self.table} WHERE agent_id = %s", (agent_id,))  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
 
     def count(self, *, agent_id: Optional[str] = None) -> int:
         with self._lock, self._conn.cursor() as cur:
             if agent_id is None:
-                cur.execute(f"SELECT COUNT(*) FROM {self.table}")
+                cur.execute(f"SELECT COUNT(*) FROM {self.table}")  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
             else:
-                cur.execute(f"SELECT COUNT(*) FROM {self.table} WHERE agent_id = %s", (agent_id,))
+                cur.execute(f"SELECT COUNT(*) FROM {self.table} WHERE agent_id = %s", (agent_id,))  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
             return int(cur.fetchone()[0])
 
     def prune(self, *, agent_id: str, keep: int) -> int:
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
-                f"""
-                DELETE FROM {self.table}
-                WHERE agent_id = %s AND id NOT IN (
-                    SELECT id FROM {self.table}
-                    WHERE agent_id = %s
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                )
-                """,
+                f"DELETE FROM {self.table} "  # nosec B608 - 表名在 __init__ 已校验为合法 SQL 标识符（re.fullmatch）
+                f"WHERE agent_id = %s AND id NOT IN ("
+                f"SELECT id FROM {self.table} WHERE agent_id = %s ORDER BY created_at DESC LIMIT %s)",
                 (agent_id, agent_id, max(keep, 0)),
             )
             return cur.rowcount or 0

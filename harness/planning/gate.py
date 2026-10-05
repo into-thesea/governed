@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class GateDecision:
-    PASS = "pass"
+    PASS = "pass"  # nosec B105 - 质量门决策状态字符串，不是密码
     RETRY = "retry"
     REPLAN = "replan"
     HUMAN = "human"

@@ -17,4 +17,5 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("harness.server.run:app", host="0.0.0.0", port=8000, reload=False)
+    from harness.config import settings
+    uvicorn.run("harness.server.run:app", host=settings.server.host, port=settings.server.port, reload=False)  # nosec B104 - 服务端绑定地址来自配置（默认 0.0.0.0 是预期默认）

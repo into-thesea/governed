@@ -130,7 +130,7 @@ class ServerSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="SERVER_", extra="ignore")
 
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # nosec B104 - 服务端绑定所有接口是预期默认（部署方可配 SERVER_HOST）
     port: int = 8000
     workers: int = 1
     reload: bool = False
