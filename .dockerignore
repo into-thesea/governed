@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# 虚拟环境
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# 数据与运行时产物
+data/
+*.sqlite
+*.db
+
+# 文档（gitignored，不进镜像）
+docs/
+
+# 测试
+tests/
+.pytest_cache
+.coverage
+htmlcov
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 环境配置（用户自行注入）
+.env
+.env.local
+
+# infra（compose 管理，不进应用镜像）
+infra/

@@ -159,6 +159,67 @@ services:
       timeout: 5s
       retries: 30
 
+  # ============================================================
+  # Redis —— 共享状态层（P0-1：分布式限流 + 可选会话缓存）
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: governed-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ============================================================
+  # Governed 应用 —— Agent 管控运行时（FastAPI + LangGraph）
+  # 首次使用前：cp .env.example .env 并填入 API Key
+  # 构建：docker compose build governed
+  # 启动：docker compose up -d governed
+  # ============================================================
+  governed:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: governed-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      # 容器网络内用 service name 代替 127.0.0.1
+      MEMORY_PG_DSN: postgresql://harness_admin:harness_admin_pw@postgres:5432/harness
+      DATASOURCE_SOURCES: '{"pg_dev":"postgresql+psycopg://harness_ro:harness_ro_pw@postgres:5432/harness","mysql_dev":"mysql+pymysql://harness_ro:harness_ro_pw@mysql:3306/harness"}'
+      # P0-1 共享状态层：Redis 分布式限流
+      RATE_LIMIT_BACKEND: redis
+      RATE_LIMIT_REDIS_URL: redis://redis:6379/0
+      # 沙箱服务端默认跑在宿主上（Docker-in-Docker 复杂，见 infra/opensandbox-server/）
+      # 若沙箱也容器化，改为 http://sandbox:8080
+      SANDBOX_SERVER_URL: http://host.docker.internal:8080
+      # Kafka / MinIO / Milvus 容器网络地址
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MINIO_ENDPOINT: minio:9000
+      MILVUS_HOST: milvus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - governed_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
 volumes:
   etcd_data:
   minio_data:
@@ -168,3 +229,5 @@ volumes:
   kafka_data:
   pg_data:
   mysql_data:
+  redis_data:
+  governed_data:
