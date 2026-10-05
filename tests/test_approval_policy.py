@@ -364,11 +364,17 @@ def test_missing_approval_channel_fails_at_assembly(monkeypatch) -> None:
         svc.assemble()
 
 
-def test_channel_none_with_approval_tools_is_a_contradiction(monkeypatch) -> None:
-    """声明无人值守、却挂着需审批的工具 —— 自相矛盾，别启。"""
+def test_channel_none_auto_approves_approval_tools(monkeypatch) -> None:
+    """无人值守模式（approval_channel='none'）：需审批工具自动批准，装配成功。
+
+    P0-1 修复后，'none' 是合法的非交互部署模式——requires_approval 工具
+    在运行时被自动批准（记审计事件，via='unattended_auto'），不再启动即报错。
+    """
     svc = _service_with_approval_tool(monkeypatch, approval_channel="none")
-    with pytest.raises(RuntimeError, match="自相矛盾"):
-        svc.assemble()
+    assembled = svc.assemble()
+    assert assembled is not None
+    # 需审批工具仍被注册（没有被静默剔除）
+    assert any(t.requires_approval for t in svc.broker.list_tools())
 
 
 def test_channel_http_assembles_normally(monkeypatch) -> None:
