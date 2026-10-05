@@ -1,0 +1,72 @@
+# ============================================================================
+# OpenSandbox Server 配置 —— 容器化版本（compose 的 sandbox 服务使用）
+#
+# 与同目录 sandbox.toml（宿主直跑版）的差异仅来自"服务端自己也在容器里"：
+#   1. server.host = 0.0.0.0    让同 compose 网络的 governed 容器能连进来
+#                               （宿主版只监听 127.0.0.1）。
+#   2. docker.host_ip          服务端经挂载的 docker.sock 在「宿主机」上创建
+#                               execd/egress 容器（Docker-out-of-Docker），这些
+#                               沙箱以 bridge + 宿主端口(40000-60000)暴露。
+#                               服务端据此把返回给 SDK 的端点 host 写成
+#                               host.docker.internal，governed 容器再经
+#                               host-gateway 回连宿主机映射端口。
+#   3. store.path 用容器内路径  /app/state（compose 挂卷 sandbox_state 持久化）。
+#
+# api_key 留空：实际凭据由 compose 经环境变量 OPENSANDBOX_SERVER_API_KEY 注入，
+# governed 侧的 SANDBOX_API_KEY 必须与之相同（compose 用同一个 ${SANDBOX_API_KEY}）。
+# ============================================================================
+
+[server]
+host = "0.0.0.0"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+api_key = ""
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.0.22"
+
+# ---------------------------------------------------------------------------
+# 文件访问平面：与宿主版完全一致 —— 禁止一切宿主路径 bind mount，
+# 主机 VFS 与沙箱之间只经 SDK Filesystem API 显式搬运（带审计点与大小上限）。
+# ---------------------------------------------------------------------------
+[storage]
+allowed_host_paths = []
+volume_default_size = "1Gi"
+
+[store]
+# 容器内 sqlite；compose 把 /app/state 挂到命名卷 sandbox_state
+type = "sqlite"
+path = "/app/state/opensandbox.db"
+
+[docker]
+# 服务端在容器内、但通过宿主 daemon 起沙箱：沙箱仍用 bridge + 宿主端口映射，
+# 并通过 host_ip 让返回给 governed(SDK) 的端点指向宿主机网关名。
+network_mode = "bridge"
+host_ip = "host.docker.internal"
+port_range_min = 40000
+port_range_max = 60000
+drop_capabilities = [
+    "AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW",
+    "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG",
+]
+no_new_privileges = true
+pids_limit = 4096
+seccomp_profile = ""
+apparmor_profile = ""
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.1.7"
+mode = "dns"
+# 连续建沙箱时 sidecar 拉起较慢，放宽就绪等待（与宿主版一致）
+readiness_timeout_seconds = 120.0
+
+[renew_intent]
+enabled = false
+min_interval_seconds = 60

@@ -1,9 +1,7 @@
 # Governed 工业级基础设施编排
 # 包含：Milvus（长期向量记忆）、Kafka（链路追踪/审计）、MinIO（VFS 文件存储）
 # 另含可选：PostgreSQL（多数据源 + pgvector 长期记忆）、MySQL（多数据源）
-# 使用：docker-compose up -d
-
-version: "3.8"
+# 使用：docker compose up -d
 
 services:
   # ============================================================
@@ -167,7 +165,8 @@ services:
     container_name: governed-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      # 宿主 16379 避免与其他项目的 redis（6379）冲突；容器内仍为 6379。
+      - "16379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -175,6 +174,57 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # ============================================================
+  # 沙箱控制面 —— OpenSandbox Server（code_executor 高危代码的隔离层）
+  #
+  # 拓扑（Docker-out-of-Docker，而非容器内再装 Docker）：
+  #   sandbox 容器挂宿主 /var/run/docker.sock，由「宿主机 daemon」动态拉起
+  #   execd / egress sidecar 与 governed-sandbox 执行容器；沙箱以 bridge +
+  #   宿主端口(40000-60000)暴露，host_ip=host.docker.internal 让返回给 SDK
+  #   的端点可从 governed 容器经 host-gateway 回连（见 sandbox.container.toml）。
+  # ============================================================
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox-server
+    image: governed-sandbox-server:latest
+    container_name: governed-sandbox-server
+    restart: unless-stopped
+    environment:
+      # 与 governed 的 SANDBOX_API_KEY 必须一致（默认值仅用于本地一键体验）
+      OPENSANDBOX_SERVER_API_KEY: ${SANDBOX_API_KEY:-governed-local-dev-key}
+    volumes:
+      # 关键：经宿主 daemon 拉起沙箱容器（DooD）
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./opensandbox-server/sandbox.container.toml:/app/sandbox.toml:ro
+      - sandbox_state:/app/state
+    ports:
+      # 仅为宿主调试；容器内 8080 的宿主映射已被 kafka-ui 占用，故用 18080。
+      # governed 在 compose 网络内直接连 http://sandbox:8080，不经此映射。
+      - "18080:8080"
+    extra_hosts:
+      # Linux 宿主提供 host.docker.internal 解析；Docker Desktop 自带、该项无害
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # 镜像零 apt 无 curl，用 Python 自带 urllib 探测
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health',timeout=4).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  # 沙箱「执行镜像」构建载体：产出 governed-sandbox:latest（pandas/numpy 运行时），
+  # 供 sandbox 控制面经宿主 daemon 拉起、在其中跑用户分析代码。本服务不常驻，
+  # 仅借 compose 的构建阶段产出镜像，启动后 echo 即退出（Exited 0 属预期）。
+  sandbox-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: governed-sandbox:latest
+    container_name: governed-sandbox-runtime-builder
+    restart: "no"
+    command: ["echo", "governed-sandbox runtime image built; not a running service"]
 
   # ============================================================
   # Governed 应用 —— Agent 管控运行时（FastAPI + LangGraph）
@@ -199,9 +249,10 @@ services:
       # P0-1 共享状态层：Redis 分布式限流
       RATE_LIMIT_BACKEND: redis
       RATE_LIMIT_REDIS_URL: redis://redis:6379/0
-      # 沙箱服务端默认跑在宿主上（Docker-in-Docker 复杂，见 infra/opensandbox-server/）
-      # 若沙箱也容器化，改为 http://sandbox:8080
-      SANDBOX_SERVER_URL: http://host.docker.internal:8080
+      # 沙箱控制面在同 compose 网络内；控制面走服务名，沙箱数据面由控制面
+      # 通告为 host.docker.internal:宿主端口（见 sandbox 的 host_ip 配置）
+      SANDBOX_SERVER_URL: http://sandbox:8080
+      SANDBOX_API_KEY: ${SANDBOX_API_KEY:-governed-local-dev-key}
       # Kafka / MinIO / Milvus 容器网络地址
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       MINIO_ENDPOINT: minio:9000
@@ -211,10 +262,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      sandbox:
+        condition: service_healthy
+    extra_hosts:
+      # 回连沙箱数据面（宿主映射端口 40000-60000）；Docker Desktop 自带、该项无害
+      - "host.docker.internal:host-gateway"
     volumes:
       - governed_data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # 镜像零 apt 无 curl，用 Python 自带 urllib 探测
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=4).status==200 else 1)"]
       interval: 10s
       timeout: 5s
       start_period: 30s
@@ -231,3 +288,4 @@ volumes:
   mysql_data:
   redis_data:
   governed_data:
+  sandbox_state:

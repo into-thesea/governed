@@ -6,16 +6,39 @@
 #
 # 构建：
 #   docker build -f infra/Dockerfile.sandbox -t governed-sandbox:latest infra/
+# 国内构建可传镜像源加速：
+#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+#                --build-arg APT_MIRROR=mirrors.tuna.tsinghua.edu.cn \
+#                -f infra/Dockerfile.sandbox -t governed-sandbox:latest infra/
 #
 # 与宿主 tools/ 的版本对齐策略：均不锁定版本，让 pip 在构建时解析当期最新，
 # 随宿主 .venv 一同演进，避免沙箱与宿主 pandas 语义漂移（pandas 3.x 有破坏性变更）。
 # ============================================================================
 FROM python:3.12-slim
 
-ENV PYTHONUNBUFFERED=1 \
+ARG PIP_INDEX_URL=
+ARG APT_MIRROR=
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    MPLBACKEND=Agg \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    MPLBACKEND=Agg
+
+# 可选：把 debian 源替换为国内镜像（APT_MIRROR 仅传域名，如 mirrors.tuna.tsinghua.edu.cn）
+# 兼容 deb822（debian.sources）与传统 sources.list 两种格式；未传则保持官方源。
+# 同时替换主源(deb.debian.org)与安全更新源(security.debian.org)，否则
+# apt-get update 会因安全源连不上而整体失败。
+# 末尾的 true 是必须的：for 循环遍历到不存在的 /etc/apt/sources.list 时，
+# [ -f ] 返回 false 会让整个 if 块退出码为 1，进而 && 短路、apt-get update 不执行。
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+        [ -f "$f" ] && sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" "$f"; \
+      done; \
+      true; \
+    fi \
+ && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
+ && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/*
 
 # 分析运行时（与 tools/ 用到的库对齐）
 RUN pip install --no-cache-dir \
@@ -23,11 +46,6 @@ RUN pip install --no-cache-dir \
         numpy \
         matplotlib \
         scipy
-
-# 中文字体：chart_generator 生成图表的场景在宿主侧完成；沙箱内若自绘图也需要
-RUN apt-get update \
- && apt-get install -y --no-install-recommends fonts-noto-cjk \
- && rm -rf /var/lib/apt/lists/*
 
 # 非 root 运行（与 OpenSandbox 的 no_new_privileges / capability 剥离策略叠加）
 RUN useradd -m -u 1000 sandbox

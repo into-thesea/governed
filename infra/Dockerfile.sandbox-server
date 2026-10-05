@@ -1,0 +1,43 @@
+# ============================================================================
+# Governed 沙箱「控制面」镜像 —— OpenSandbox Server
+#
+# 与 Dockerfile.sandbox 的分工（两者都要，勿混淆）：
+#   Dockerfile.sandbox         = governed-sandbox：沙箱「内」跑用户分析代码的
+#                                运行时镜像（pandas/numpy，非 root）。
+#   Dockerfile.sandbox-server  = governed-sandbox-server：沙箱「服务端」控制面，
+#                                负责创建/回收沙箱。它通过挂载进来的
+#                                /var/run/docker.sock 让宿主机的 Docker daemon
+#                                动态拉起 execd / egress / governed-sandbox
+#                                容器（Docker-out-of-Docker，而非容器内再装 Docker）。
+#
+# 不装 curl：healthcheck 用 Python 自带 urllib；opensandbox-server 及其依赖
+# （fastapi / docker SDK / grpcio）在 Python 3.12 上均有 wheel，无需编译工具链。
+#
+# 构建（compose 已配置，一般无需手动）：
+#   docker build -f infra/Dockerfile.sandbox-server -t governed-sandbox-server:latest infra/
+# ============================================================================
+FROM python:3.12-slim
+
+ARG PIP_INDEX_URL=
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SANDBOX_CONFIG_PATH=/app/sandbox.toml
+
+# opensandbox-server 会拉入 fastapi / grpcio / docker SDK；均为 wheel
+RUN pip install --no-cache-dir opensandbox-server==0.2.3
+
+WORKDIR /app
+RUN mkdir -p /app/state
+
+EXPOSE 8080
+
+# 服务端自带 /health（返回 {"status":"healthy"}）；用 urllib 探测，无需 curl
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=5 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health',timeout=4).status==200 else 1)"
+
+# 与 start.ps1 等价的入口：直接经 python -c 调 CLI，绕开在部分环境会静默
+# 退出的 opensandbox-server console 脚本；配置文件由 compose 以只读卷挂载。
+CMD ["python", "-c", "from opensandbox_server.cli import main; main()", \
+     "--config", "/app/sandbox.toml"]

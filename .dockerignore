@@ -41,3 +41,12 @@ Thumbs.db
 
 # infra（compose 管理，不进应用镜像）
 infra/
+
+# 本地嵌入模型缓存（约 1.6G；容器内用 EMBEDDING_PROVIDER=disabled/remote，不打进镜像）
+models--*
+
+# Agent / IDE 本地状态与构建元数据（运行时不需要）
+.claude
+.superpowers
+.jbeval
+governed.egg-info
