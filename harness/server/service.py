@@ -138,7 +138,21 @@ class HarnessService:
         # 为假）—— 权限层等于空转。这里接上：未配置规则时默认放行，行为不变。
         from harness.pdp import PDP
 
+        # 限流：按 RATE_LIMIT_BACKEND 选实现。process=进程内滑动窗口（单机默认），
+        # redis=共享 Redis（多副本时限流配额全局一致）。未知 backend 显式报错不静默回退。
+        from harness.rate_limiter import build_rate_limiter
+        rl_backend = settings.rate_limit.backend
+        if rl_backend == "redis":
+            import redis as _redis
+            rl_url = settings.rate_limit.redis_url
+            if not rl_url:
+                raise ValueError("RATE_LIMIT_BACKEND=redis 需要配置 RATE_LIMIT_REDIS_URL")
+            _rl = build_rate_limiter("redis", redis_client=_redis.Redis.from_url(rl_url))
+        else:
+            _rl = build_rate_limiter(rl_backend)
+
         broker = ToolBroker(
+            rate_limiter=_rl,
             middleware_manager=middleware,
             pdp=PDP.from_settings(settings.permission),
             audit_logger=get_audit_logger(),

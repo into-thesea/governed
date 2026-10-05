@@ -50,6 +50,7 @@ from harness.events import (
 )
 from harness.middleware import MiddlewareContext, MiddlewareManager
 from harness.models import ToolDef
+from harness.rate_limiter import RateLimiter, build_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ class ToolBroker:
         audit_logger: Optional[AuditLogger] = None,
         circuit_breaker: Optional[Any] = None,
         cache: Optional[Any] = None,
+        rate_limiter: Optional[Any] = None,
         approval_threshold: str = RISK_MEDIUM,
         approval_deny_threshold: str = RISK_CRITICAL,
     ):
@@ -166,12 +168,18 @@ class ToolBroker:
                 拒还是问由这条线拍板（见 ``docs/技术选型决策.md`` D-007）。
         """
         self._tools: dict[str, tuple[ToolDef, ToolHandler]] = {}
-        self._call_log: dict[str, list[float]] = {}
-        # 限流的判定与记账必须原子完成，否则并发调用会同时通过检查。
-        # ponytail: 全局锁 + 进程内窗口 —— 每个进程各算各的，多副本部署时实际
-        # 放行量是「副本数 × rate_limit_per_min」。要跨副本一致，需把 _call_log
-        # 挪到 Redis（zset + Lua 做滑动窗口），届时代替本锁。
-        self._rate_lock = threading.Lock()
+        # 限流：抽象为 RateLimiter ABC，单机默认 ProcessRateLimiter（进程内滑动窗口），
+        # 多副本可切 RedisRateLimiter（zset+Lua 共享状态）。ToolBroker 只依赖 ABC。
+        if rate_limiter is None:
+            self._rate_limiter: RateLimiter = build_rate_limiter("process")
+        elif rate_limiter is False:
+            # 显式 False = 关闭限流（不推荐，仅用于测试/调试）
+            from harness.rate_limiter import NoopRateLimiter
+            self._rate_limiter = NoopRateLimiter()
+        else:
+            self._rate_limiter = rate_limiter
+        # 累计调用次数的独立锁（与限流窗口分开：限流会涨落，计数只增不减）
+        self._counts_lock = threading.Lock()
         # 会话级人工审批豁免：键 (session_id, tool) → 授予记录。
         # 与 PDP 的区别：PDP 是 (角色, 工具) 的**全局**策略表，写进去会影响所有任务且永久；
         # 这里只豁免"人工审批"这一步，且随任务收尾清除 —— 进程重启即丢是**有意**的失败方向
@@ -201,6 +209,7 @@ class ToolBroker:
             ("sandbox_executor", sandbox_executor),
             ("circuit_breaker", circuit_breaker),
             ("cache", cache),
+            ("rate_limiter", rate_limiter),
         ):
             if value is True:
                 raise TypeError(
@@ -255,8 +264,8 @@ class ToolBroker:
         """注销工具，返回是否成功。"""
         if name in self._tools:
             del self._tools[name]
-            with self._rate_lock:
-                self._call_log.pop(name, None)
+            # 注销工具时清掉它的限流窗口记录（重新注册后配额干净）。
+            self._rate_limiter.reset(name)
             logger.info("Unregistered tool: %s", name)
             return True
         return False
@@ -477,7 +486,7 @@ class ToolBroker:
         与 ``get_stats()["tools"][*]["recent_calls_1min"]`` 的区别：那是**滚动窗口**，
         会涨也会落，当监控的 counter 用是错的。这一份是给 ``/metrics`` 的口径。
         """
-        with self._rate_lock:
+        with self._counts_lock:
             return dict(self._call_counts)
 
     def approval_fallback(self, tool_name: str) -> Optional[str]:
@@ -683,7 +692,7 @@ class ToolBroker:
                 return False, f"熔断：{breaker_error}", {}
 
         # ---- 6. 限流准入（判定 + 记账原子完成）----
-        rate_ok, rate_error = self._try_acquire(tool_name, tool_def.rate_limit_per_min)
+        rate_ok, rate_error = self._rate_limiter.acquire(tool_name, tool_def.rate_limit_per_min)
         if not rate_ok:
             self._audit(
                 trace_id=trace_id, session_id=session_id, agent_id=agent_id, role=role,
@@ -775,7 +784,7 @@ class ToolBroker:
         # ---- 9.8 累计计数 ----
         # 与审计同一处取终值：`ok` 到这一步才定（中间件可能改写结果），口径必须与审计
         # 一致，否则"指标说 3 次失败、审计里 5 条"这种对不上会让人先怀疑监控再怀疑代码。
-        with self._rate_lock:
+        with self._counts_lock:
             key = (tool_name, bool(ok))
             self._call_counts[key] = self._call_counts.get(key, 0) + 1
 
@@ -836,43 +845,22 @@ class ToolBroker:
         return True, ""
 
     def _try_acquire(self, tool_name: str, max_per_min: int) -> tuple[bool, str]:
-        """限流准入：滑动时间窗口的「判定 + 记账」在一次加锁内原子完成。
+        """限流准入（兼容旧调用）：委托给 self._rate_limiter.acquire。
 
-        判定与记账必须原子，否则并发调用会同时通过判定再各自记账
-        （check-then-act 竞态），实际放行量超过阈值。记账点在**准入时**而非
-        执行后，由此确定两条语义：
-
-        - 放行数严格等于 ``max_per_min``，与该工具的耗时无关；
-        - 准入后执行失败的调用同样占用配额。限流管的是"发起频率"而非"成功
-          次数"，否则一个持续失败的工具反而永远不会触发限流。
+        新代码应直接调用 self._rate_limiter.acquire；保留此方法是为了兼容
+        可能存在的外部/测试直接调用。
         """
-        now = time.time()
-        window_start = now - _RATE_LIMIT_WINDOW_SECONDS
-
-        with self._rate_lock:
-            recent = [t for t in self._call_log.get(tool_name, []) if t > window_start]
-            if len(recent) >= max_per_min:
-                # 被拒绝的调用不计入窗口，否则持续重试会把窗口越撑越满。
-                self._call_log[tool_name] = recent
-                return False, (
-                    f"工具 '{tool_name}' 每分钟最多调用 {max_per_min} 次，"
-                    f"当前已调用 {len(recent)} 次"
-                )
-            recent.append(now)
-            self._call_log[tool_name] = recent
-        return True, ""
+        return self._rate_limiter.acquire(tool_name, max_per_min)
 
     # ------------------------------------------------------------------
     # 统计与调试
     # ------------------------------------------------------------------
     def get_stats(self) -> dict[str, Any]:
         """获取 Broker 统计信息。"""
-        now = time.time()
-        with self._rate_lock:
-            recent_by_tool = {
-                name: len([t for t in stamps if t > now - _RATE_LIMIT_WINDOW_SECONDS])
-                for name, stamps in self._call_log.items()
-            }
+        recent_by_tool = {
+            td.name: self._rate_limiter.current_window_count(td.name)
+            for td in self.list_tools()
+        }
         return {
             "total_tools": len(self._tools),
             "tools": [
@@ -899,7 +887,7 @@ class ToolBroker:
             "circuit_breaker": self.breaker.snapshot() if self.breaker is not None else {},
             # 同理：限流窗口是进程内的，多副本时每个副本各算一份。报出来，免得
             # 看到 rate_limit_per_min 就以为全局总量被卡住了。
-            "rate_limit_scope": "process",
+            "rate_limit_scope": self._rate_limiter.scope,
         }
 
     def __len__(self) -> int:

@@ -558,15 +558,39 @@ class CheckpointSettings(BaseSettings):
 
     ``backend="sqlite"``（默认）把中断状态落盘：服务重启后仍能继续审批。
     ``backend="memory"`` 是进程内实现，重启即丢 —— 仅用于测试与短命令流程。
+    ``backend="postgres"`` 用共享 PG 存检查点：多副本部署时审批中断状态跨副本一致，
+    配合 Redis 限流一起构成"共享会话/窗口状态"层（见 deploy/README）。
     """
 
     model_config = SettingsConfigDict(env_prefix="CHECKPOINT_", extra="ignore")
 
     backend: str = "sqlite"
-    """``sqlite`` | ``memory``。未知取值会显式报错，不静默回退。"""
+    """``sqlite`` | ``memory`` | ``postgres``。未知取值会显式报错，不静默回退。"""
 
     sqlite_path: str = "data/checkpoints.sqlite"
     """sqlite 后端的状态文件（项目相对路径，父目录自动创建）。"""
+
+    postgres_dsn: str = ""
+    """postgres 后端的连接串，如 ``postgresql://user:pass@host:5432/db``。
+    ``backend="postgres"`` 时必填，为空会显式报错。"""
+
+
+class RateLimitSettings(BaseSettings):
+    """工具调用限流配置（滑动窗口）。
+
+    ``backend="process"``（默认）是进程内滑动窗口：单机够用，多副本时各副本各算各的，
+    实际放行量 = 副本数 × 配额。
+    ``backend="redis"`` 用共享 Redis（zset + Lua 原子滑动窗口）：多副本时限流配额全局一致。
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RATE_LIMIT_", extra="ignore")
+
+    backend: str = "process"
+    """``process`` | ``redis``。未知取值会显式报错，不静默回退。"""
+
+    redis_url: str = ""
+    """redis 后端的连接串，如 ``redis://host:6379/0``。
+    ``backend="redis"`` 时必填，为空会显式报错。"""
 
 
 class DataSourceSettings(BaseSettings):
@@ -639,6 +663,7 @@ class Settings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     quality: QualitySettings = Field(default_factory=QualitySettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     pii: PIISettings = Field(default_factory=PIISettings)

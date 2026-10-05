@@ -123,7 +123,7 @@ class TestRateLimitWindow:
         """跨过 60 秒窗口后旧记录被清理，配额恢复。"""
         clock = {"now": 1000.0}
         monkeypatch.setattr(
-            "harness.tool_broker.time", SimpleNamespace(time=lambda: clock["now"])
+            "harness.rate_limiter.time", SimpleNamespace(time=lambda: clock["now"])
         )
 
         broker = _make_broker(1)

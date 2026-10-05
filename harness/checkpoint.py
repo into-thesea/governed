@@ -83,9 +83,29 @@ async def build_checkpointer(config: Any = None) -> Any:
             serde=JsonPlusSerializer(allowed_msgpack_modules=state_types()),
         )
 
+    if backend == "postgres":
+        import psycopg
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+        dsn = getattr(cfg, "postgres_dsn", "") or ""
+        if not dsn:
+            raise ValueError(
+                "CHECKPOINT_BACKEND=postgres 需要配置 CHECKPOINT_POSTGRES_DSN"
+                "（如 postgresql://user:pass@host:5432/db）"
+            )
+        # 连接惰性建立（与 sqlite 同模式：传 coroutine，首次 await 时真正连上）。
+        # Postgres 表不会自动创建，需显式 setup()——在首次使用前调用，幂等。
+        saver = AsyncPostgresSaver(
+            psycopg.AsyncConnection.connect(dsn),
+            serde=JsonPlusSerializer(allowed_msgpack_modules=state_types()),
+        )
+        await saver.setup()
+        return saver
+
     raise ValueError(
         f"未知的 checkpointer backend: {backend!r}"
-        "（CHECKPOINT_BACKEND 支持 memory | sqlite）"
+        "（CHECKPOINT_BACKEND 支持 memory | sqlite | postgres）"
     )
 
 
