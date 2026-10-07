@@ -545,9 +545,12 @@ class _TwiceApprovalLLM(ApprovalLLM):
             and str(m.get("content", "")).startswith("Observation")
         )
         if "（analyst）" in system and n_obs < 2:
+            # 高风险代码（`socket` 属 _RISKY_MARKERS）：两次调用都**必须**问人，
+            # 与"沙箱在不在"无关。若用纯计算（low），沙箱真可用时第一次就被自动放行，
+            # 根本不会停下来 —— 这两条用例的前提就没了。
             return json.dumps(
                 {"thought": "再跑一次代码", "action": "code_executor",
-                 "action_input": {"code": f"print({n_obs})"}},
+                 "action_input": {"code": f"import socket; print(socket.gethostname(), {n_obs})"}},
                 ensure_ascii=False,
             )
 
@@ -577,8 +580,8 @@ def test_http_end_to_end_second_call_not_asked(monkeypatch, tmp_path) -> None:
     """整条链路：同一任务里 code_executor 被请两次 —— 授予"总是允许"后第二次不再弹卡。
 
     这条走真实 HTTP（TestClient / ASGI）+ 真实 LangGraph interrupt，是本功能最强的
-    自动化验证。沙箱不可用时 code_executor 会 fail closed，但**不影响**审批闸门的观测：
-    两种情况下"第二次是否弹卡"都由豁免决定。
+    自动化验证。`_TwiceApprovalLLM` 发的是高风险代码，两次调用在任何环境下都必须问人，
+    所以"第二次是否弹卡"只由豁免决定 —— 与机器上沙箱起没起无关。
     """
     from fastapi.testclient import TestClient
 

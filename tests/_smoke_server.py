@@ -82,9 +82,16 @@ class ApprovalLLM:
         )
         # 角色标记：analyst 的子 Agent 提示词里带"（analyst）"
         if "（analyst）" in system and n_obs == 0:
+            # 故意用**高风险**代码（`socket` 是 _RISKY_MARKERS 之一）：风险高于阈值时
+            # **任何环境**都要问人（见 harness/approval_policy.py「风险 > threshold → ask」，
+            # 与兜底机制无关）。曾经这里用纯计算 `print('hi')`（low）——low 在**沙箱真可用**
+            # 时会被自动放行，于是"停下来等审批"这一前提会随机器上沙箱起没起而翻转，
+            # 让 test_server_auth / test_console_api / test_guard_events 等一批用例
+            # 只在沙箱是死的降级环境下才绿。换成高风险后与兜底无关，两个环境都一致。
+            # 代码本身无害（取主机名，不出网），万一被批准后真在沙箱里跑也无副作用。
             return json.dumps(
                 {"thought": "运行代码", "action": "code_executor",
-                 "action_input": {"code": "print('hi')"}},
+                 "action_input": {"code": "import socket; print(socket.gethostname())"}},
                 ensure_ascii=False,
             )
 

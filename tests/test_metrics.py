@@ -155,9 +155,27 @@ def test_guard_and_approval_totals_move_with_real_events(service) -> None:
 
 
 def test_sandbox_gauge_reflects_runtime_not_configuration(service) -> None:
-    """这个 gauge 的价值全在"运行时"三个字上：配置开着但服务没起，必须是 0。"""
+    """这个 gauge 的价值全在"运行时"三个字上：配置开着但服务没起，必须是 0。
+
+    反过来也必须成立：真可用时是 1 —— 两边都钉死才叫"跟运行时走"。用替身注入
+    两种运行时状态，**不能**依赖"这台机器上沙箱起没起"：曾经这条用例只断言 0，
+    于是在沙箱真活着的环境里必然失败（同一个根源：把环境当成了断言前提）。
+    """
+    class _Down:
+        def available(self):
+            return False, "stub：沙箱服务未起"
+
+    class _Up:
+        def available(self):
+            return True, "stub：沙箱可用"
+
+    service.broker.sandbox = _Down()
     samples, _ = _parse(render_metrics(service))
-    assert _value(samples, "governed_sandbox_available") == 0.0
+    assert _value(samples, "governed_sandbox_available") == 0.0, "配置开着但服务不可用 → 必须是 0"
+
+    service.broker.sandbox = _Up()
+    samples, _ = _parse(render_metrics(service))
+    assert _value(samples, "governed_sandbox_available") == 1.0, "服务真可用 → 必须是 1"
 
 
 # ----------------------------------------------------------------------
